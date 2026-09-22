@@ -165,3 +165,79 @@ def test_ambiguous_property_reference(client):
     )
     assert r.status_code == 422
     assert r.json()["error"]["details"]["errors"][0]["type"] == "AMBIGUOUS_PROPERTY_REFERENCE"
+
+
+def test_celsius_declared_denominator_zero_rejected_with_point_index(client):
+    # 回归：摄氏度声明的物性，临界温度（T+C 精确为零）必须与开尔文声明走同一条
+    # 受理期整单拒收（JOB_VALIDATION_FAILED + point_index + component_index），
+    # 而不是求解期才抛 PROPERTY_SET_VALIDATION_FAILED；且作业整单不落库。
+    t_crit_c = 40.0  # °C
+    # 组分 0 的 C 取成负的工况温度 → T_C + C_C = 0；组分 1 给正常系数。
+    # 刻意取较小的 B：既保留“分母为零”这一非法性，又让非临界点上的正常点
+    # K 值温和（不把闪蒸内核推到与本回归无关的极端 K 数值边界）。
+    cels_body = {
+        "name": "celsius-critical",
+        "pressure_unit": "kPa",
+        "temperature_unit": "C",
+        "components": [
+            {"name": "crit", "antoine": {"a": 10.0, "b": 100.0, "c": -t_crit_c}},
+            {"name": "ok", "antoine": {"a": 10.0, "b": 100.0, "c": 200.0}},
+        ],
+    }
+    r = client.post("/property-sets", json=cels_body)
+    assert r.status_code == 201
+    ps_c = r.json()["id"]
+
+    # 等价的开尔文声明：C_K = C_C − 273.15，临界点 T_K = T_C + 273.15
+    kelv_body = {
+        "name": "kelvin-equivalent",
+        "pressure_unit": "kPa",
+        "temperature_unit": "K",
+        "components": [
+            {"name": "crit", "antoine": {"a": 10.0, "b": 100.0, "c": -t_crit_c - 273.15}},
+            {"name": "ok", "antoine": {"a": 10.0, "b": 100.0, "c": 200.0 - 273.15}},
+        ],
+    }
+    rk = client.post("/property-sets", json=kelv_body)
+    assert rk.status_code == 201
+    ps_k = rk.json()["id"]
+
+    def _submit(ps_id, temperature, unit):
+        return client.post(
+            "/jobs",
+            json={
+                "name": f"crit-{unit}",
+                "property_set_id": ps_id,
+                "points": [
+                    # 临界点放在第 1 个点（序号 0 前先放一个正常点也不必，直接验序号）
+                    {"temperature": temperature, "pressure": 70.0, "feed": [0.5, 0.5]},
+                ],
+            },
+        )
+
+    before = len(client.get("/jobs").json())
+
+    rc = _submit(ps_c, t_crit_c, "C")
+    assert rc.status_code == 422
+    err = rc.json()["error"]
+    # 必须是作业级整单拒收，带工况点定位；不能退化成物性校验失败
+    assert err["type"] == "JOB_VALIDATION_FAILED"
+    assert err["details"]["errors"][0]["type"] == "ANTOINE_DENOMINATOR_ZERO"
+    assert err["details"]["errors"][0]["point_index"] == 0
+    assert err["details"]["errors"][0]["component_index"] == 0
+
+    # 等价开尔文声明在同一临界物理状态上行为一致
+    rke = _submit(ps_k, t_crit_c + 273.15, "K")
+    assert rke.status_code == 422
+    err_k = rke.json()["error"]
+    assert err_k["type"] == "JOB_VALIDATION_FAILED"
+    e0 = err_k["details"]["errors"][0]
+    assert e0["type"] == "ANTOINE_DENOMINATOR_ZERO"
+    assert e0["point_index"] == 0 and e0["component_index"] == 0
+
+    # 整单不落库：两次拒收后作业数量不变
+    assert len(client.get("/jobs").json()) == before
+
+    # 临界点之外，摄氏度声明仍正常受理（数值路径未被改动）
+    ro = _submit(ps_c, t_crit_c + 10.0, "C")
+    assert ro.status_code == 201

@@ -27,14 +27,15 @@ from app.schemas import JobCreate
 from app.services.property_service import PropertyService
 from app.thermo import flash as flash_mod
 from app.thermo.antoine import (
+    ANTOINE_DENOM_MIN,
     AntoineCoefficients,
+    antoine_denominator_k,
     antoine_psat_kpa,
     equilibrium_constants,
 )
 from app.thermo.units import pressure_to_kpa, temperature_to_kelvin
 
 _FEED_SUM_TOL = 1.0e-6
-_ANTOINE_DENOM_MIN = 1.0e-6
 
 
 def _now() -> str:
@@ -200,14 +201,16 @@ class JobService:
             t_k = temperature_to_kelvin(pt.temperature, prop["temperature_unit"])
             for ci, comp in enumerate(prop["components"]):
                 a, b, c = comp["antoine"]
-                c_shift = c if prop["temperature_unit"] == "K" else c + 273.15
-                denom = t_k + c_shift
                 if not all(math.isfinite(v) for v in (a, b, c)):
                     errs.append(
                         _err(index, "INVALID_ANTOINE_COEFFICIENTS",
                              f"组分 {ci} 的 Antoine 系数缺失或非有限数")
                     )
-                elif abs(denom) < _ANTOINE_DENOM_MIN:
+                    continue
+                # 分母换算必须与 antoine_psat_kpa 求值路径同一份实现，
+                # 否则摄氏度声明在临界温度上会漏拦截、错走求解期的物性校验失败
+                denom = antoine_denominator_k(t_k, c, prop["temperature_unit"])
+                if abs(denom) < ANTOINE_DENOM_MIN:
                     errs.append(
                         _err(
                             index,
