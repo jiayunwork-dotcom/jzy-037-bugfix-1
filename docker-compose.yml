@@ -1,0 +1,21 @@
+services:
+  flash-api:
+    build: .
+    image: binary-isothermal-flash:latest
+    container_name: flash-api
+    ports:
+      - "8000:8000"
+    environment:
+      FLASH_DB_PATH: /data/flash.db
+      FLASH_SEED_DEMO: "1"
+    volumes:
+      - flash-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  flash-data:
