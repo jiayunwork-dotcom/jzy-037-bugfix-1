@@ -27,14 +27,15 @@ from app.schemas import JobCreate
 from app.services.property_service import PropertyService
 from app.thermo import flash as flash_mod
 from app.thermo.antoine import (
+    ANTOINE_DENOM_MIN,
     AntoineCoefficients,
+    antoine_denominator,
     antoine_psat_kpa,
     equilibrium_constants,
 )
 from app.thermo.units import pressure_to_kpa, temperature_to_kelvin
 
 _FEED_SUM_TOL = 1.0e-6
-_ANTOINE_DENOM_MIN = 1.0e-6
 
 
 def _now() -> str:
@@ -200,14 +201,13 @@ class JobService:
             t_k = temperature_to_kelvin(pt.temperature, prop["temperature_unit"])
             for ci, comp in enumerate(prop["components"]):
                 a, b, c = comp["antoine"]
-                c_shift = c if prop["temperature_unit"] == "K" else c + 273.15
-                denom = t_k + c_shift
+                denom = antoine_denominator(t_k, c, prop["temperature_unit"])
                 if not all(math.isfinite(v) for v in (a, b, c)):
                     errs.append(
                         _err(index, "INVALID_ANTOINE_COEFFICIENTS",
                              f"组分 {ci} 的 Antoine 系数缺失或非有限数")
                     )
-                elif abs(denom) < _ANTOINE_DENOM_MIN:
+                elif abs(denom) < ANTOINE_DENOM_MIN:
                     errs.append(
                         _err(
                             index,

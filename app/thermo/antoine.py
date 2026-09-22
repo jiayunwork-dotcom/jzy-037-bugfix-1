@@ -26,7 +26,10 @@ from app.errors import PropertyValidationError
 from app.thermo.units import pressure_to_kpa, temperature_to_kelvin
 
 # 分母绝对值小于该阈值视为 Antoine 退化（接近极点），拒绝计算
-_ANTOINE_DENOM_MIN = 1.0e-6
+ANTOINE_DENOM_MIN = 1.0e-6
+
+# 摄氏温标与开尔文温标之间的平移量
+_TEMP_C_OFFSET = 273.15
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,21 @@ class AntoineCoefficients:
     a: float
     b: float
     c: float
+
+
+def antoine_denominator(temperature_k: float, c: float, temperature_unit: str) -> float:
+    """统一的 Antoine 分母 T + C（K）。
+
+    登记的 C 与声明温标绑定：用 °C 登记时先平移 ``C − 273.15``，与
+    :func:`app.thermo.units.temperature_to_kelvin` 换算后的温度相加，即
+
+        T_K + C_K = (T_C + 273.15) + (C_C − 273.15) = T_C + C_C
+
+    受理预检与实际求值必须共用本函数，避免两处平移不一致导致拦截错位。
+    """
+
+    c_shifted = c if temperature_unit == "K" else c - _TEMP_C_OFFSET
+    return temperature_k + c_shifted
 
 
 def antoine_psat_kpa(
@@ -55,10 +73,9 @@ def antoine_psat_kpa(
         raise PropertyValidationError("Antoine 系数必须为有限实数")
 
     t_ref = temperature_to_kelvin(temperature, temperature_unit)
-    # C 与声明温标绑定：摄氏度的 C 需平移到 Kelvin 平移量
-    c_shifted = coeff.c if temperature_unit == "K" else coeff.c - 273.15
-    denom = t_ref + c_shifted
-    if abs(denom) < _ANTOINE_DENOM_MIN:
+    # C 与声明温标绑定：摄氏度的 C 需平移 -273.15 到 K 标（与预检共用同一份分母）
+    denom = antoine_denominator(t_ref, coeff.c, temperature_unit)
+    if abs(denom) < ANTOINE_DENOM_MIN:
         raise PropertyValidationError(
             f"Antoine 分母 T + C 在 T={temperature:g} {temperature_unit} 处接近零"
             f"（|T+C|={abs(denom):.3e}），该系数无法在此温度使用",
